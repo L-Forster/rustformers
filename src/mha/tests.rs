@@ -10,55 +10,35 @@ fn test_mha_shape() {
     let batch_size = 2;
     let seq_len = 4;
     let d_model = 8;
+    let n_heads = 2;
     
-    // Create random tensors
-    let q: Tensor<TestBackend, 3> = Tensor::random([batch_size, seq_len, d_model], Distribution::Standard, &device);
-    let k: Tensor<TestBackend, 3> = Tensor::random([batch_size, seq_len, d_model], Distribution::Standard, &device);
-    let v: Tensor<TestBackend, 3> = Tensor::random([batch_size, seq_len, d_model], Distribution::Standard, &device);
+    let config = MhaConfig::new(d_model, n_heads);
+    let mha = config.init::<TestBackend>(&device);
 
-    let output = mha(q.clone(), k, v);
+    // Create random tensors
+    let q: Tensor<TestBackend, 3> = Tensor::random([batch_size, seq_len, d_model], Distribution::Default, &device);
+    let k: Tensor<TestBackend, 3> = Tensor::random([batch_size, seq_len, d_model], Distribution::Default, &device);
+    let v: Tensor<TestBackend, 3> = Tensor::random([batch_size, seq_len, d_model], Distribution::Default, &device);
+
+    let output = mha.forward(q, k, v);
     
     assert_eq!(output.dims(), [batch_size, seq_len, d_model]);
 }
 
 #[test]
-fn test_mha_attention_mechanism() {
+fn test_mha_forward() {
     let device = Default::default();
+    let d_model = 8;
+    let n_heads = 2;
     
-    // Simple case: 1 batch, 2 tokens, embedding dim 2
-    // Q matches K exactly for the first position to attend to first position strongly
-    // But softmax will distribute it.
+    let config = MhaConfig::new(d_model, n_heads);
+    let mha = config.init::<TestBackend>(&device);
+
+    let x: Tensor<TestBackend, 3> = Tensor::random([1, 4, d_model], Distribution::Default, &device);
     
-    // Q = [[100.0, 0.0], [0.0, 100.0]]
-    // K = [[100.0, 0.0], [0.0, 100.0]]
-    // V = [[1.0, 2.0], [3.0, 4.0]]
+    // Self-attention: q=k=v=x
+    let output = mha.forward(x.clone(), x.clone(), x.clone());
     
-    // Score[0,0] = (100*100 + 0) / sqrt(2) = 10000/1.414 = 7072
-    // Score[0,1] = 0
-    // Softmax([7072, 0]) -> [1.0, 0.0] (approx)
-    // Output[0] = 1.0 * V[0] + 0.0 * V[1] = [1.0, 2.0]
-    
-    let q_data = [100.0, 0.0, 0.0, 100.0];
-    let k_data = [100.0, 0.0, 0.0, 100.0];
-    let v_data = [1.0, 2.0, 3.0, 4.0];
-    
-    let q: Tensor<TestBackend, 3> = Tensor::from_floats(q_data, &device).reshape([1, 2, 2]);
-    let k: Tensor<TestBackend, 3> = Tensor::from_floats(k_data, &device).reshape([1, 2, 2]);
-    let v: Tensor<TestBackend, 3> = Tensor::from_floats(v_data, &device).reshape([1, 2, 2]);
-    
-    let output = mha(q, k, v);
-    let output_data = output.into_data();
-    
-    // Check values
-    // We expect output to be close to V because Q and K are aligned diagonal matrices with large values
-    // so attention matrix is Identity.
-    
-    let vals = output_data.convert::<f32>().value;
-    
-    // vals should be [1.0, 2.0, 3.0, 4.0]
-    assert!((vals[0] - 1.0).abs() < 1e-3);
-    assert!((vals[1] - 2.0).abs() < 1e-3);
-    assert!((vals[2] - 3.0).abs() < 1e-3);
-    assert!((vals[3] - 4.0).abs() < 1e-3);
+    assert_eq!(output.dims(), [1, 4, d_model]);
 }
 
