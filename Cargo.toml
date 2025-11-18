@@ -1,0 +1,10 @@
+[package]
+name = "rustformers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+burn = { version = "0.19.1", features = ["wgpu", "train"] }
+
+[dev-dependencies]
+burn-ndarray = "0.19.1"

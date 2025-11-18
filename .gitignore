@@ -1,3 +1,5 @@
 src/tokenizer/byte-pair.exe
 src/tokenizer/byte-pair.pdb
 src/tokenizer/data/
+target/
+Cargo.lock
