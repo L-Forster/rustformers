@@ -1,5 +1,5 @@
 use burn::{
-    nn::{Linear, LinearConfig},
+    nn::{Linear, LinearConfig, Dropout, DropoutConfig},
     prelude::*,
     tensor::activation::softmax,
 };
@@ -20,16 +20,17 @@ impl MhaConfig {
         let key = LinearConfig::new(self.d_model, self.d_model).init(device);
         let value = LinearConfig::new(self.d_model, self.d_model).init(device);
         let output = LinearConfig::new(self.d_model, self.d_model).init(device);
+        let dropout = DropoutConfig::new(self.dropout).init();
 
         MultiHeadAttention {
             query,
             key,
             value,
             output,
+            dropout,
             n_heads: self.n_heads,
             d_head,
             d_model: self.d_model,
-            dropout: self.dropout,
         }
     }
 }
@@ -40,14 +41,14 @@ pub struct MultiHeadAttention<B: Backend> {
     key: Linear<B>,
     value: Linear<B>,
     output: Linear<B>,
+    dropout: Dropout,
     n_heads: usize,
     d_head: usize,
     d_model: usize,
-    dropout: f64,
 }
 
 impl<B: Backend> MultiHeadAttention<B> {
-    pub fn forward(&self, q: Tensor<B, 3>, k: Tensor<B, 3>, v: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn compute_multi_head_attention(&self, q: Tensor<B, 3>, k: Tensor<B, 3>, v: Tensor<B, 3>) -> Tensor<B, 3> {
         let [batch_size, seq_len, _] = q.dims();
 
         // 1. Linear Projections
@@ -67,7 +68,7 @@ impl<B: Backend> MultiHeadAttention<B> {
         let v = v.swap_dims(1, 2);
 
         // 3. Scaled Dot-Product Attention
-        let output = attention(q, k, v);
+        let output = scaled_dot_product_attention(q, k, v, &self.dropout);
 
         // 4. Merge Heads
         // [batch, heads, seq, d_head] -> [batch, seq, heads, d_head]
@@ -81,7 +82,7 @@ impl<B: Backend> MultiHeadAttention<B> {
     }
 }
 
-fn attention<B: Backend>(q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>) -> Tensor<B, 4> {
+fn scaled_dot_product_attention<B: Backend>(q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>, dropout: &Dropout) -> Tensor<B, 4> {
     let d_k = k.dims()[3] as f64;
     
     // Q * K^T -> [batch, heads, seq, seq]
@@ -91,6 +92,9 @@ fn attention<B: Backend>(q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>) -> T
     
     // Softmax over the last dimension
     let weights = softmax(scores, 3);
+    
+    // Apply dropout to attention weights
+    let weights = dropout.forward(weights);
     
     // Weights * V -> [batch, heads, seq, d_head]
     weights.matmul(v)
