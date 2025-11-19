@@ -10,16 +10,26 @@ pub struct MhaConfig {
     pub n_heads: usize,
     #[config(default = 0.1)]
     pub dropout: f64,
+    #[config(default = true)]
+    pub bias: bool,
 }
 
 impl MhaConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> MultiHeadAttention<B> {
         let d_head = self.d_model / self.n_heads;
         
-        let query = LinearConfig::new(self.d_model, self.d_model).init(device);
-        let key = LinearConfig::new(self.d_model, self.d_model).init(device);
-        let value = LinearConfig::new(self.d_model, self.d_model).init(device);
-        let output = LinearConfig::new(self.d_model, self.d_model).init(device);
+        let query = LinearConfig::new(self.d_model, self.d_model)
+            .with_bias(self.bias)
+            .init(device);
+        let key = LinearConfig::new(self.d_model, self.d_model)
+            .with_bias(self.bias)
+            .init(device);
+        let value = LinearConfig::new(self.d_model, self.d_model)
+            .with_bias(self.bias)
+            .init(device);
+        let output = LinearConfig::new(self.d_model, self.d_model)
+            .with_bias(self.bias)
+            .init(device);
         let dropout = DropoutConfig::new(self.dropout).init();
 
         MultiHeadAttention {
@@ -48,7 +58,13 @@ pub struct MultiHeadAttention<B: Backend> {
 }
 
 impl<B: Backend> MultiHeadAttention<B> {
-    pub fn compute_multi_head_attention(&self, q: Tensor<B, 3>, k: Tensor<B, 3>, v: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn compute_multi_head_attention(
+        &self, 
+        q: Tensor<B, 3>, 
+        k: Tensor<B, 3>, 
+        v: Tensor<B, 3>, 
+        mask: Option<Tensor<B, 4>>
+    ) -> Tensor<B, 3> {
         let [batch_size, seq_len, _] = q.dims();
 
         // 1. Linear Projections
@@ -68,7 +84,7 @@ impl<B: Backend> MultiHeadAttention<B> {
         let v = v.swap_dims(1, 2);
 
         // 3. Scaled Dot-Product Attention
-        let output = scaled_dot_product_attention(q, k, v, &self.dropout);
+        let output = scaled_dot_product_attention(q, k, v, mask, &self.dropout);
 
         // 4. Merge Heads
         // [batch, heads, seq, d_head] -> [batch, seq, heads, d_head]
@@ -82,14 +98,24 @@ impl<B: Backend> MultiHeadAttention<B> {
     }
 }
 
-fn scaled_dot_product_attention<B: Backend>(q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>, dropout: &Dropout) -> Tensor<B, 4> {
+fn scaled_dot_product_attention<B: Backend>(
+    q: Tensor<B, 4>, 
+    k: Tensor<B, 4>, 
+    v: Tensor<B, 4>, 
+    mask: Option<Tensor<B, 4>>,
+    dropout: &Dropout
+) -> Tensor<B, 4> {
     let d_k = k.dims()[3] as f64;
     
     // Q * K^T -> [batch, heads, seq, seq]
     // Swap last two dimensions of K to transpose it for matmul
     let k_t = k.swap_dims(2, 3);
-    let scores = q.matmul(k_t) / d_k.sqrt();
+    let mut scores = q.matmul(k_t) / d_k.sqrt();
     
+    if let Some(mask) = mask {
+        scores = scores + mask;
+    }
+
     // Softmax over the last dimension
     let weights = softmax(scores, 3);
     

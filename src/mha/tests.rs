@@ -20,7 +20,7 @@ fn test_mha_shape() {
     let k: Tensor<TestBackend, 3> = Tensor::random([batch_size, seq_len, d_model], Distribution::Default, &device);
     let v: Tensor<TestBackend, 3> = Tensor::random([batch_size, seq_len, d_model], Distribution::Default, &device);
 
-    let output = mha.compute_multi_head_attention(q, k, v);
+    let output = mha.compute_multi_head_attention(q, k, v, None);
     
     assert_eq!(output.dims(), [batch_size, seq_len, d_model]);
 }
@@ -37,7 +37,7 @@ fn test_mha_forward() {
     let x: Tensor<TestBackend, 3> = Tensor::random([1, 4, d_model], Distribution::Default, &device);
     
     // Self-attention: q=k=v=x
-    let output = mha.compute_multi_head_attention(x.clone(), x.clone(), x.clone());
+    let output = mha.compute_multi_head_attention(x.clone(), x.clone(), x.clone(), None);
     
     assert_eq!(output.dims(), [1, 4, d_model]);
 }
@@ -63,8 +63,7 @@ fn test_scaled_dot_product_attention_math() {
     let dropout = dropout_config.init();
 
     // 3. Run Function
-    // We can access this because tests is a child module of mha
-    let output = super::scaled_dot_product_attention(q, k, v, &dropout);
+    let output = super::scaled_dot_product_attention(q, k, v, None, &dropout);
     
     // 4. Manual Calculation Verification
     // d_k = 2.0. sqrt(d_k) = 1.41421356
@@ -93,3 +92,38 @@ fn test_scaled_dot_product_attention_math() {
     assert!((output_data[1] - 9.952).abs() < tolerance, "Expected ~9.952, got {}", output_data[1]); 
 }
 
+#[test]
+fn test_scaled_dot_product_attention_masking() {
+    let device = Default::default();
+    
+    // Setup inputs: q0, q1 identical. k0, k1 identical. v0=[1,2], v1=[3,4].
+    let q_data: [f32; 4] = [1.0, 0.0, 1.0, 0.0]; 
+    let k_data: [f32; 4] = [1.0, 0.0, 1.0, 0.0];
+    let v_data: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+    
+    let q = Tensor::<TestBackend, 1>::from_floats(q_data, &device).reshape([1, 1, 2, 2]);
+    let k = Tensor::<TestBackend, 1>::from_floats(k_data, &device).reshape([1, 1, 2, 2]);
+    let v = Tensor::<TestBackend, 1>::from_floats(v_data, &device).reshape([1, 1, 2, 2]);
+    
+    // Mask out index 1 for query 0.
+    // mask shape [1, 1, 2, 2]
+    // q0 attends to k0, k1. Mask k1 (index 1).
+    // q1 attends to k0, k1. No mask.
+    let mask_data: [f32; 4] = [0.0, -1.0e9, 0.0, 0.0];
+    let mask = Tensor::<TestBackend, 1>::from_floats(mask_data, &device).reshape([1, 1, 2, 2]);
+    
+    let dropout = burn::nn::DropoutConfig::new(0.0).init();
+    
+    let output = super::scaled_dot_product_attention(q, k, v, Some(mask), &dropout);
+    
+    let output_data = output.into_data().convert::<f32>().to_vec::<f32>().unwrap();
+    println!("Masked Output: {:?}", output_data);
+    
+    // Row 0: q0 attends only to k0. Output should be v0 = [1.0, 2.0].
+    assert!((output_data[0] - 1.0).abs() < 1e-3, "Expected 1.0, got {}", output_data[0]);
+    assert!((output_data[1] - 2.0).abs() < 1e-3, "Expected 2.0, got {}", output_data[1]);
+    
+    // Row 1: q1 attends to k0 and k1 equally. Output should be average of v0 and v1 = [2.0, 3.0].
+    assert!((output_data[2] - 2.0).abs() < 1e-3, "Expected 2.0, got {}", output_data[2]);
+    assert!((output_data[3] - 3.0).abs() < 1e-3, "Expected 3.0, got {}", output_data[3]);
+}
