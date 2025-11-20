@@ -1,12 +1,10 @@
 use burn::{
-    nn::{Linear, LinearConfig, Dropout, DropoutConfig},
+    nn::{Dropout, DropoutConfig, Linear, LinearConfig},
     prelude::*,
 };
+pub use burn::backend::wgpu::{Wgpu as DefaultBackend, WgpuDevice as DefaultDevice};
 
 mod utils;
-// Re-export utils if needed, or just use them internally.
-// Tests might need access to utils, so we might want to make utils public mod or re-export.
-// But usually `mod utils` makes it private to `mha`. `tests` is a child module so it can access `super::utils`.
 use utils::{scaled_dot_product_attention};
 
 #[derive(Config, Debug)]
@@ -20,7 +18,7 @@ pub struct MhaConfig {
 }
 
 impl MhaConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> MultiHeadAttention<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> MultiHeadAttentionCore<B> {
         let d_head = self.d_model / self.n_heads;
         
         // Fused QKV projection: [d_model] -> [3 * d_model]
@@ -34,7 +32,7 @@ impl MhaConfig {
             
         let dropout = DropoutConfig::new(self.dropout).init();
 
-        MultiHeadAttention {
+        MultiHeadAttentionCore {
             qkv,
             output,
             dropout,
@@ -51,7 +49,7 @@ pub struct MhaOutput<B: Backend> {
 }
 
 #[derive(Module, Debug)]
-pub struct MultiHeadAttention<B: Backend> {
+pub struct MultiHeadAttentionCore<B: Backend> {
     qkv: Linear<B>,
     output: Linear<B>,
     dropout: Dropout,
@@ -60,7 +58,12 @@ pub struct MultiHeadAttention<B: Backend> {
     d_model: usize,
 }
 
-impl<B: Backend> MultiHeadAttention<B> {
+impl<B: Backend> MultiHeadAttentionCore<B> {
+    /// Construct a module using an explicit device.
+    pub fn new(d_model: usize, n_heads: usize, device: &B::Device) -> Self {
+        MhaConfig::new(d_model, n_heads).init(device)
+    }
+
     /// Forward pass for Multi-Head Self-Attention.
     pub fn forward(
         &self, 
@@ -106,6 +109,41 @@ impl<B: Backend> MultiHeadAttention<B> {
             context,
             weights: Some(weights),
         }
+    }
+}
+
+/// Wrapper to provide a simple, PyTorch-like API with default backend handling.
+pub struct MultiHeadAttention {
+    model: MultiHeadAttentionCore<DefaultBackend>,
+    device: DefaultDevice,
+}
+
+impl MultiHeadAttention {
+    pub fn new(d_model: usize, n_heads: usize) -> Self {
+        let device = DefaultDevice::default();
+        let model = MultiHeadAttentionCore::<DefaultBackend>::new(d_model, n_heads, &device);
+        Self { model, device }
+    }
+
+    pub fn with_device(d_model: usize, n_heads: usize, device: DefaultDevice) -> Self {
+        let model = MultiHeadAttentionCore::<DefaultBackend>::new(d_model, n_heads, &device);
+        Self { model, device }
+    }
+
+    pub fn forward(
+        &self,
+        input: Tensor<DefaultBackend, 3>,
+        mask: Option<Tensor<DefaultBackend, 4>>,
+    ) -> MhaOutput<DefaultBackend> {
+        self.model.forward(input, mask)
+    }
+
+    pub fn device(&self) -> &DefaultDevice {
+        &self.device
+    }
+
+    pub fn inner(&self) -> &MultiHeadAttentionCore<DefaultBackend> {
+        &self.model
     }
 }
 

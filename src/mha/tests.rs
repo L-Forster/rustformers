@@ -81,26 +81,6 @@ fn test_scaled_dot_product_attention_masking() {
     let v = Tensor::<TestBackend, 1>::from_floats(v_data, &device).reshape([1, 1, 2, 2]);
     
     // Mask k1 (index 1).
-    // We use large negative for additive mask, or just let the helper handle it if we passed 0/1?
-    // The previous test passed -1e9 directly.
-    // Our new `apply_attention_mask` helper "Auto-converts" if it thinks it should, 
-    // OR we pass the additive mask directly.
-    // Let's pass the additive mask as before (-1e9), because the helper will check if it needs conversion?
-    // Wait, `apply_attention_mask` implementation:
-    // `let anti_mask = m.neg().add_scalar(1.0); let additive = anti_mask.mul_scalar(min_val);`
-    // This formula `(1 - mask) * min_val` ASSUMES mask is 0/1.
-    // If we pass `-1e9`, `1 - (-1e9)` is huge. `huge * -1e9` is huge negative.
-    // So if we pass an additive mask, `apply_attention_mask` as implemented will BREAK it.
-    
-    // CORRECTION: I need to fix `apply_attention_mask` or the test.
-    // The prompt said: "Auto-convert boolean/zero–one masks into additive form."
-    // It did NOT say "Support both seamlessly".
-    // But standard practice suggests supporting additive if provided.
-    // However, my implementation of `apply_attention_mask` strictly assumes 0/1 mask.
-    // So I must update the test to provide a 0/1 mask.
-    // Mask: 1 = keep, 0 = mask.
-    // We want to mask index 1. So [1, 0].
-    
     let mask_data: [f32; 4] = [1.0, 0.0, 1.0, 1.0]; // q0 masks k1. q1 keeps both.
     let mask = Tensor::<TestBackend, 1>::from_floats(mask_data, &device).reshape([1, 1, 2, 2]);
     
