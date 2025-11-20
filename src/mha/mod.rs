@@ -1,8 +1,13 @@
 use burn::{
     nn::{Linear, LinearConfig, Dropout, DropoutConfig},
     prelude::*,
-    tensor::activation::softmax,
 };
+
+mod utils;
+// Re-export utils if needed, or just use them internally.
+// Tests might need access to utils, so we might want to make utils public mod or re-export.
+// But usually `mod utils` makes it private to `mha`. `tests` is a child module so it can access `super::utils`.
+use utils::{scaled_dot_product_attention};
 
 #[derive(Config, Debug)]
 pub struct MhaConfig {
@@ -18,24 +23,19 @@ impl MhaConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> MultiHeadAttention<B> {
         let d_head = self.d_model / self.n_heads;
         
-        let query = LinearConfig::new(self.d_model, self.d_model)
+        // Fused QKV projection: [d_model] -> [3 * d_model]
+        let qkv = LinearConfig::new(self.d_model, self.d_model * 3)
             .with_bias(self.bias)
             .init(device);
-        let key = LinearConfig::new(self.d_model, self.d_model)
-            .with_bias(self.bias)
-            .init(device);
-        let value = LinearConfig::new(self.d_model, self.d_model)
-            .with_bias(self.bias)
-            .init(device);
+            
         let output = LinearConfig::new(self.d_model, self.d_model)
             .with_bias(self.bias)
             .init(device);
+            
         let dropout = DropoutConfig::new(self.dropout).init();
 
         MultiHeadAttention {
-            query,
-            key,
-            value,
+            qkv,
             output,
             dropout,
             n_heads: self.n_heads,
@@ -45,11 +45,14 @@ impl MhaConfig {
     }
 }
 
+pub struct MhaOutput<B: Backend> {
+    pub context: Tensor<B, 3>,
+    pub weights: Option<Tensor<B, 4>>,
+}
+
 #[derive(Module, Debug)]
 pub struct MultiHeadAttention<B: Backend> {
-    query: Linear<B>,
-    key: Linear<B>,
-    value: Linear<B>,
+    qkv: Linear<B>,
     output: Linear<B>,
     dropout: Dropout,
     n_heads: usize,
@@ -58,72 +61,52 @@ pub struct MultiHeadAttention<B: Backend> {
 }
 
 impl<B: Backend> MultiHeadAttention<B> {
-    pub fn compute_multi_head_attention(
+    /// Forward pass for Multi-Head Self-Attention.
+    pub fn forward(
         &self, 
-        q: Tensor<B, 3>, 
-        k: Tensor<B, 3>, 
-        v: Tensor<B, 3>, 
+        input: Tensor<B, 3>, 
         mask: Option<Tensor<B, 4>>
-    ) -> Tensor<B, 3> {
-        let [batch_size, seq_len, _] = q.dims();
+    ) -> MhaOutput<B> {
+        let [batch_size, seq_len, d_model_in] = input.dims();
+        
+        debug_assert_eq!(d_model_in, self.d_model, "Input embedding dim must match config");
 
-        // 1. Linear Projections
-        let q = self.query.forward(q);
-        let k = self.key.forward(k);
-        let v = self.value.forward(v);
-
-        // 2. Split Heads & Transpose
-        // [batch, seq, d_model] -> [batch, seq, heads, d_head]
-        let q = q.reshape([batch_size, seq_len, self.n_heads, self.d_head]);
-        let k = k.reshape([batch_size, seq_len, self.n_heads, self.d_head]);
-        let v = v.reshape([batch_size, seq_len, self.n_heads, self.d_head]);
-
-        // [batch, seq, heads, d_head] -> [batch, heads, seq, d_head]
-        let q = q.swap_dims(1, 2);
-        let k = k.swap_dims(1, 2);
-        let v = v.swap_dims(1, 2);
+        // 1. Fused QKV
+        let qkv_out = self.qkv.forward(input);
+        
+        // 2. Split & Reshape
+        let chunks = qkv_out.chunk(3, 2);
+        let (q, k, v) = (chunks[0].clone(), chunks[1].clone(), chunks[2].clone());
+        
+        let q = q.reshape([batch_size, seq_len, self.n_heads, self.d_head]).swap_dims(1, 2);
+        let k = k.reshape([batch_size, seq_len, self.n_heads, self.d_head]).swap_dims(1, 2);
+        let v = v.reshape([batch_size, seq_len, self.n_heads, self.d_head]).swap_dims(1, 2);
+        
+        #[cfg(debug_assertions)]
+        {
+             let [b, h, s, d] = q.dims();
+             debug_assert_eq!(b, batch_size);
+             debug_assert_eq!(h, self.n_heads);
+             debug_assert_eq!(s, seq_len);
+             debug_assert_eq!(d, self.d_head);
+        }
 
         // 3. Scaled Dot-Product Attention
-        let output = scaled_dot_product_attention(q, k, v, mask, &self.dropout);
+        let (context, weights) = scaled_dot_product_attention(
+            q, k, v, mask, &self.dropout, self.d_head as f64
+        );
 
         // 4. Merge Heads
-        // [batch, heads, seq, d_head] -> [batch, seq, heads, d_head]
-        let output = output.swap_dims(1, 2);
-        
-        // [batch, seq, heads, d_head] -> [batch, seq, d_model]
-        let output = output.reshape([batch_size, seq_len, self.d_model]);
+        let context = context.swap_dims(1, 2).reshape([batch_size, seq_len, self.d_model]);
 
         // 5. Output Projection
-        self.output.forward(output)
+        let context = self.output.forward(context);
+        
+        MhaOutput {
+            context,
+            weights: Some(weights),
+        }
     }
-}
-
-fn scaled_dot_product_attention<B: Backend>(
-    q: Tensor<B, 4>, 
-    k: Tensor<B, 4>, 
-    v: Tensor<B, 4>, 
-    mask: Option<Tensor<B, 4>>,
-    dropout: &Dropout
-) -> Tensor<B, 4> {
-    let d_k = k.dims()[3] as f64;
-    
-    // Q * K^T -> [batch, heads, seq, seq]
-    // Swap last two dimensions of K to transpose it for matmul
-    let k_t = k.swap_dims(2, 3);
-    let mut scores = q.matmul(k_t) / d_k.sqrt();
-    
-    if let Some(mask) = mask {
-        scores = scores + mask;
-    }
-
-    // Softmax over the last dimension
-    let weights = softmax(scores, 3);
-    
-    // Apply dropout to attention weights
-    let weights = dropout.forward(weights);
-    
-    // Weights * V -> [batch, heads, seq, d_head]
-    weights.matmul(v)
 }
 
 #[cfg(test)]
